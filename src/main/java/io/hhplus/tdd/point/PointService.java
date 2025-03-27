@@ -6,12 +6,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class PointService {
 
     private final PointHistoryTable pointHistoryTable; // 사용자 포인트 이력 테이블
     private final UserPointTable userPointTable; // 사용자 포인트 테이블
+    private final Lock lock = new ReentrantLock(); // Lock 객체 생성
+    private final ConcurrentHashMap<Long, Lock> locks = new ConcurrentHashMap<>();
 
     @Autowired
     public PointService(PointHistoryTable pointHistoryTable, UserPointTable userPointTable) {
@@ -29,21 +34,28 @@ public class PointService {
 
         final long maxRechargeLimit = 5000L; // 충전가능 최대 금액
 
-        UserPoint userPointInfo = userPointTable.selectById(id);
-        long savePoint = (userPointInfo == null)? 0 : userPointInfo.point(); //저장된 포인트
+        Lock userLock = locks.computeIfAbsent(id, key -> new ReentrantLock());
 
-        // 충전가능 금액 초과 시
-        if(savePoint + amount > maxRechargeLimit || amount > maxRechargeLimit ) throw new RuntimeException("충전가능 금액을 초과했습니다.");
+        userLock.lock(); // Lock
 
-        // 사용자 포인트 충전
-        long totalAmount = savePoint + amount;
-        UserPoint userPoint = userPointTable.insertOrUpdate(id, totalAmount);
+        try {
+            UserPoint userPointInfo = userPointTable.selectById(id);
+            long savePoint = (userPointInfo == null)? 0 : userPointInfo.point(); //저장된 포인트
 
-        // 포인트 충전이력 저장
-        pointHistoryTable.insert(id, amount, TransactionType.CHARGE, userPoint.updateMillis());
+            // 충전가능 금액 초과 시
+            if(savePoint + amount > maxRechargeLimit || amount > maxRechargeLimit ) throw new IllegalArgumentException("충전가능 금액을 초과했습니다.");
 
-        return userPoint;
+            // 사용자 포인트 충전
+            long totalAmount = savePoint + amount;
+            UserPoint userPoint = userPointTable.insertOrUpdate(id, totalAmount);
 
+            // 포인트 충전이력 저장
+            pointHistoryTable.insert(id, amount, TransactionType.CHARGE, userPoint.updateMillis());
+
+            return userPoint;
+        } finally {
+            userLock.unlock(); // Lock 해제
+        }
     }
 
     /**
@@ -54,24 +66,30 @@ public class PointService {
      * */
     public UserPoint usePoints(long id, long amount) {
 
-        // 현재 포인트 확인
-        UserPoint userPointInfo = userPointTable.selectById(id);
+        lock.lock(); // Lock
 
-        // 충전된 포인트가 없는 사용자의 경우
-        if(userPointInfo == null) throw new RuntimeException("충전된 포인트가 없습니다.");
+        try {
+            // 현재 포인트 확인
+            UserPoint userPointInfo = userPointTable.selectById(id);
 
-        // 잔고에 남은 포인트보다 사용하려는 금액이 더 많은 경우
-        if(userPointInfo.point() < amount) throw new RuntimeException("잔고가 부족합니다.");
+            // 충전된 포인트가 없는 사용자의 경우
+            if (userPointInfo == null) throw new IllegalArgumentException("충전된 포인트가 없습니다.");
 
-        // 사용자 포인트 사용
-        long savePoint = userPointInfo.point() - amount;
-        UserPoint userPoint = userPointTable.insertOrUpdate(id, savePoint);
+            // 잔고에 남은 포인트보다 사용하려는 금액이 더 많은 경우
+            if (userPointInfo.point() < amount) throw new RuntimeException("잔고가 부족합니다.");
 
-        // 포인트 충전이력 저장
-        pointHistoryTable.insert(id, amount, TransactionType.USE, userPoint.updateMillis());
+            // 사용자 포인트 사용
+            long savePoint = userPointInfo.point() - amount;
+            UserPoint userPoint = userPointTable.insertOrUpdate(id, savePoint);
 
-        return userPoint;
+            // 포인트 충전이력 저장
+            pointHistoryTable.insert(id, amount, TransactionType.USE, userPoint.updateMillis());
 
+            return userPoint;
+
+        } finally {
+            lock.unlock(); // Lock 해제
+        }
     }
 
     /**
@@ -85,7 +103,7 @@ public class PointService {
         UserPoint userPointInfo = userPointTable.selectById(id);
 
         //  존재하지 않는 사용자인 경우
-        if(userPointInfo == null) throw new RuntimeException("존재하지 않는 사용자입니다.");
+        if(userPointInfo == null) throw new IllegalArgumentException("존재하지 않는 사용자입니다.");
 
         return userPointTable.selectById(id);
     }
